@@ -2,7 +2,7 @@
 
 A behavioural op-amp macromodel written in Verilog-A, compiled with [OpenVAF](https://openvaf.semimod.de/) and simulated with [ngspice](https://ngspice.sourceforge.io/) via the OSDI interface.
 
-Based on the modular macromodel architecture by Mike Brinson (see `docs/Qucs-Brinson Model.pdf`). Default parameters model a typical UA741. All non-linearities use smooth `tanh`-based functions for robust convergence — no `if/else` conditionals in the signal path.
+Based on the modular macromodel architecture by Mike Brinson (see `docs/Qucs-Brinson Model.pdf`). Default parameters model a typical UA741.
 
 ## Quick Start
 
@@ -68,15 +68,16 @@ module opamp_module(inp, inn, out, vdd, vss);
 
 See `docs/Model-Implementation-Report.md` for the full parameter list and detailed architecture description.
 
-## Simulator Options
+## Known Limitations
 
-For transient simulations where the output clips at the supply rails, include these convergence options:
+**DC sweep in open-loop (comparator) configurations** does not work correctly. The `if/else` non-linearities in the slew rate limiter, current limiter, and output voltage clamp cause the Newton–Raphson solver to become trapped at one supply rail during DC sweeps. The comparator output never transitions between rails.
 
-```spice
-.option method=gear reltol=5e-3 itl4=500 trtol=7
-```
+This does **not** affect:
+- Transient analysis (comparator switching works correctly)
+- Operating point analysis at a fixed bias
+- Any closed-loop configuration (buffers, amplifiers, integrators, etc.)
 
-These are not needed for DC, AC, or transient analysis where the output stays within the rails. See §7 of the implementation report for details.
+Resolving this requires replacing the `if/else` non-linearities with smooth functions while preserving correct DC operating point convergence in complex multi-amplifier circuits. See §6 of the implementation report for details.
 
 ## Project Structure
 

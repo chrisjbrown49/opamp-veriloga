@@ -6,8 +6,6 @@ This document describes the Verilog-A behavioural macromodel for a general-purpo
 
 The default parameter set models a typical **UA741** operational amplifier. All parameters are exposed and can be overridden per-instance or per-model card in a SPICE netlist, making the model suitable for representing a wide range of voltage-feedback op-amps.
 
-All non-linearities in the model use smooth `tanh`-based functions — there are no `if/else` conditionals in the signal path. This ensures continuous Jacobian derivatives throughout the operating range, which is essential for robust Newton–Raphson convergence in DC sweep and transient analysis.
-
 ### Toolchain
 
 | Component | Role |
@@ -54,8 +52,7 @@ All parameters carry OpenVAF-compatible attributes (`desc`, `units`) and enforce
 | `PSRT` | 500 kV/s | V/s | Positive slew rate |
 | `NSRT` | 500 kV/s | V/s | Negative slew rate |
 | `ILMAX` | 35 mA | A | Maximum DC output current |
-| `CSCALE` | 50 | S | Output current clamp conductance |
-| `VILIMSF` | 1000 | — | Gain-stage clamp scaling factor (see §5.6) |
+| `CSCALE` | 50 | — | Current limit scaling factor |
 
 ---
 
@@ -77,8 +74,6 @@ At the start of every evaluation the model computes a set of intermediate consta
 | `CP2` | 1 / (2π × FP2) | Capacitor of the second pole |
 | `Slewratepositive` | PSRT / (2π × GBP) | Slew-limiter positive threshold (in volts) |
 | `Slewratenegative` | NSRT / (2π × GBP) | Slew-limiter negative threshold (in volts) |
-| `Slewavg` | (Slewratepositive + Slewratenegative) / 2 | Average slew-rate threshold for the tanh saturation |
-| `Vilim` | VILIMSF × max(Slewratepositive, Slewratenegative) | Gain-stage voltage clamp limit |
 
 The first-pole transfer function has a DC gain of RP1 (≈ 200 000 for 106 dB) and a time constant of RP1 × CP1, placing the dominant pole at GBP / A_OL. Together with the unity-gain second pole (RP2 = 1 Ω), this produces the classic two-pole open-loop response.
 
@@ -107,11 +102,11 @@ The model implements a cascade of functional blocks connected by internal nodes.
                               └──────────────┘
                                       │
                               ┌──────────────┐
-                     n12 ◄────┤  Slew Limiter │ (tanh saturation)
+                     n12 ◄────┤  Slew Limiter │ (if/else clamp)
                               └──────────────┘
                                       │
                               ┌──────────────┐
-                     n3  ◄────┤  First Pole   │ (gain stage + Vilim clamp)
+                     n3  ◄────┤  First Pole   │ (gain stage)
                               └──────────────┘
                                       │
                               ┌──────────────┐
@@ -119,11 +114,7 @@ The model implements a cascade of functional blocks connected by internal nodes.
                               └──────────────┘
                                       │
                               ┌──────────────┐
-                     n4  ◄────┤  Pass-through │
-                              └──────────────┘
-                                      │
-                              ┌──────────────┐
-              n2 ──► out  ◄───┤  Output Stage │ (RO + current clamp
+              n2 ──► out  ◄───┤  Output Stage │ (RO + current limiter
                               │               │  + voltage clamp)
                               └──────────────┘
 ```
@@ -210,33 +201,27 @@ This yields `V(n11) = V(n7, n9) + V(n10)`, combining both signal paths for proce
 
 ### 5.5 Slew Rate Limiter
 
-The slew rate limiter uses a `tanh` saturation function to smoothly limit the drive voltage to the gain stage:
+The slew rate limiter uses `if/else` conditionals to hard-clip the drive voltage:
 
 ```verilog
-Slewavg = (Slewratepositive + Slewratenegative) / 2.0;
-I(n12) <+ -Slewavg * tanh(V(n11) / Slewavg);
+if (V(n11) > Slewratepositive)
+    I(n12) <+ -Slewratepositive;
+else if (V(n11) < -Slewratenegative)
+    I(n12) <+ Slewratenegative;
+else
+    I(n12) <+ -V(n11);
 I(n12) <+ V(n12);
 ```
 
-This produces the transfer characteristic `V(n12) = Slewavg × tanh(V(n11) / Slewavg)`, which has three key properties:
-
-1. **Unity gain for small signals:** When `|V(n11)| ≪ Slewavg`, `tanh(x) ≈ x`, so `V(n12) ≈ V(n11)`. The slew limiter is transparent to normal-amplitude signals.
-
-2. **Smooth limiting for large signals:** When `|V(n11)| ≫ Slewavg`, `tanh → ±1` and `V(n12) → ±Slewavg`. The drive to the gain stage is bounded, limiting the current available to charge `CP1` and constraining the output slew rate.
-
-3. **Bounded Jacobian:** The self-admittance at `n12` is always 1 S (from the `V(n12)` term). The cross-admittance `∂I(n12)/∂V(n11)` ranges smoothly from −1 to 0. There are no stiffness spikes or Jacobian discontinuities.
-
-The threshold voltages are derived from the slew rate parameters as:
+When `|V(n11)|` is within the slew-rate thresholds, the signal passes through at unity gain. When it exceeds a threshold, the drive is clamped to ±Slewrate. The thresholds are derived from the slew rate parameters as:
 
 ```
 Slewrate_threshold = SR / (2π × GBP)
 ```
 
-For the default parameters, `Slewavg ≈ 0.0796 V`. The `tanh` function begins to compress the signal at about 50% of this value and is effectively saturated above 3× the threshold.
+For the default parameters, `Slewratepositive = Slewratenegative ≈ 0.0796 V`.
 
-When `PSRT ≠ NSRT`, the limiter uses the average of the two thresholds. For the default symmetric case (`PSRT = NSRT`), this is exact.
-
-### 5.6 First Pole — Gain Stage with Voltage Clamp
+### 5.6 First Pole — Gain Stage
 
 The dominant pole is implemented as a transresistance amplifier with a parallel RC:
 
@@ -248,26 +233,7 @@ I(n3) <+ ddt(CP1 * V(n3));     // shunt capacitance (sets pole frequency)
 
 The DC gain is `V(n3) / V(n12) = RP1 = 10^(AOLDC/20)` and the pole frequency is `1 / (2π × RP1 × CP1) = GBP / RP1`.
 
-**Internal voltage clamp (Vilim):** In open-loop or comparator configurations the large DC gain (≈ 200 000) can drive `V(n3)` to extreme voltages. A smooth `tanh`-based conductance clamp bounds `V(n3)` to the range ±Vilim:
-
-```verilog
-Vilim = VILIMSF * max(Slewratepositive, Slewratenegative);
-
-Vn3hi = V(n3) - Vilim;
-Vn3lo = (-Vilim) - V(n3);
-I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3hi)) * Vn3hi;
-I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3lo)) * (-Vn3lo);
-```
-
-The clamp limit `Vilim` is derived from the slew-rate threshold rather than from the supply voltages, keeping it purely parameter-dependent. This avoids introducing Jacobian coupling between the gain-stage node `n3` and the supply nodes.
-
-With the default `VILIMSF = 1000` and default slew parameters, `Vilim ≈ 80 V`. This provides sufficient headroom for the gain stage during normal operation (where `V(n3)` tracks the output voltage) while preventing the extreme internal voltages (thousands of volts) that cause convergence failures in open-loop configurations.
-
-**Anti-windup effect:** When the output is clamped at a supply rail (e.g. in the voltage-limit test), the gain-stage integrator would otherwise "wind up" — accumulating voltage on `V(n3)` far beyond the output range. With `Vilim = 80 V`, the maximum windup is bounded. When the input reverses, `V(n3)` can slew back through this range in approximately `2 × Vilim / (Slewavg / CP1) ≈ 320 µs`, which is fast enough for typical operating frequencies. At the previous default of `VILIMSF = 10000` (`Vilim ≈ 800 V`), recovery could take over 3 ms, exceeding a full cycle of a 1 kHz signal and preventing the output from reaching the opposite rail.
-
-Each clamp term implements a soft-switched 1 S conductance that activates when `V(n3)` exceeds the clamp boundary. The `tanh` function provides a smooth transition (approximately 40 mV wide with K = 50), ensuring continuous derivatives in the Jacobian matrix.
-
-In closed-loop operation, `V(n3)` is proportional to the output voltage and is always well below `Vilim`, so the clamp is completely inactive and does not affect circuit accuracy.
+There is no internal voltage clamp on `V(n3)`. In open-loop or comparator configurations the large DC gain (≈ 200 000) can drive `V(n3)` to extreme voltages (thousands of volts). This does not affect circuit accuracy (the output is clamped at the supply rails) but can contribute to convergence difficulties in DC analysis (see §8).
 
 ### 5.7 Second Pole
 
@@ -281,16 +247,33 @@ I(n5) <+ ddt(CP2 * V(n5));     // pole at FP2
 
 The pole frequency is `1 / (2π × RP2 × CP2) = FP2`. This models the parasitic high-frequency roll-off beyond the gain-bandwidth product.
 
-### 5.8 Signal Pass-Through
+### 5.8 Current Limiter Stage
 
-The signal from the second pole is passed through to the output driver at unity gain:
+The output current is limited by a multiplicative feedback mechanism:
 
 ```verilog
-I(n4) <+ -V(n5);
-I(n4) <+ V(n4);
+if (V(n2, out) >= ILMAX)
+begin
+    I(n4) <+ -V(n5);
+    I(n4) <+ CSCALE * V(n5) * (V(n2, out) - ILMAX);
+    I(n4) <+ V(n4);
+end
+else if (V(n2, out) <= -ILMAX)
+begin
+    I(n4) <+ -V(n5);
+    I(n4) <+ -CSCALE * V(n5) * (V(n2, out) + ILMAX);
+    I(n4) <+ V(n4);
+end
+else
+begin
+    I(n4) <+ -V(n5);
+    I(n4) <+ V(n4);
+end
 ```
 
-This gives `V(n4) = V(n5)` at DC. Node `n4` is the voltage that drives the output resistance network. Critically, this is a simple pass-through with no multiplicative dependence on `V(n5)`, which ensures that `V(n4)` always has the same sign as `V(n5)`. This prevents the reversed-drive pathology that can arise when a feedback-based current limiter multiplies by `V(n5)` (see §5.10).
+In all branches, `V(n5)` is passed through to `V(n4)` at unity gain. When `|V(n2,out)|` (the output current flowing through the 1 Ω sense resistor) exceeds `ILMAX`, the additional `CSCALE × V(n5) × excess` term modifies the drive to `n4`, reducing the current delivered to the output.
+
+The `CSCALE` parameter (default 50) controls the stiffness of the current limiting.
 
 ### 5.9 Output Resistance
 
@@ -303,98 +286,54 @@ I(n2, out) <+ V(n2, out);              // 1 Ω current sense
 
 The total output impedance between `n4` and `out` is `(RO − 1) + 1 = RO` ohms. The 1 Ω element between `n2` and `out` serves as the current-sense resistor: `V(n2, out)` equals the output current in amps.
 
-### 5.10 Output Current Limiter
+### 5.10 Output Voltage Clamp
 
-The output current is limited by a `tanh`-based clamp applied at the current-sense node `n2`. When the magnitude of `V(n2, out)` (which represents the output current through the 1 Ω sense resistor) exceeds `ILMAX`, the clamp absorbs excess current at `n2`, preventing it from reaching the output:
-
-```verilog
-Iohi = V(n2, out) - ILMAX;
-Iolo = (-ILMAX) - V(n2, out);
-I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iohi)) * Iohi;
-I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iolo)) * (-Iolo);
-```
-
-When `V(n2, out)` is within ±ILMAX, both `tanh` factors are ≈ 0 and the clamp contributes no current. When `V(n2, out)` exceeds `ILMAX`, the positive clamp term activates, draining current from `n2` to ground. This lowers `V(n2)`, reducing the voltage across the 1 Ω sense resistor and thereby limiting the output current. The negative limit works symmetrically.
-
-The `CSCALE` parameter (default 50 S) controls how stiffly the current is clamped. Larger values enforce the limit more tightly.
-
-This formulation is **independent of `V(n5)`**, which is essential for robustness. An earlier multiplicative design (`CSCALE × V(n5) × ΔI`) suffered from a sign-flip pathology: when `|V(n5)| > RO / CSCALE` (= 1.5 V with defaults), the feedback term overwhelmed the signal pass-through, inverting V(n4) and driving current backwards through the output stage. This created a stable parasitic DC equilibrium where the output was pinned at a supply rail regardless of input. The decoupled `tanh` clamp eliminates this failure mode entirely.
-
-### 5.11 Output Voltage Clamp
-
-The output voltage is clamped to the supply rails using a pair of smooth `tanh`-based conductance clamps:
+The output voltage is clamped to the supply rails using an `if/else` conductance switch:
 
 ```verilog
-Vhi = V(out) - V(vdd);
-Vlo = V(vss) - V(out);
-I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vhi)) * Vhi;
-I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vlo)) * (-Vlo);
+if (V(out) > V(vdd))
+begin
+    I(out) <+ -10.0 * V(vdd);
+    I(out) <+ 10.0 * V(out);
+end
+else if (V(out) < V(vss))
+begin
+    I(out) <+ -10.0 * V(vss);
+    I(out) <+ 10.0 * V(out);
+end
 ```
 
-Each term implements a soft-switched 10 S conductance that activates when the output exceeds the respective supply rail. The `tanh` function with K = 50 gives a smooth transition approximately 40 mV wide around each rail, ensuring:
-
-- **Continuity:** The clamp current and its first derivative are continuous everywhere, which is essential for Newton–Raphson convergence during DC sweep and transient analysis.
-- **Rail tracking:** The clamp limits automatically follow `V(vdd)` and `V(vss)`, so the output swing adapts to any supply configuration without requiring parameter changes.
-- **Low interference:** Below the supply rails, the `tanh` factor evaluates to ≈ 0 and the clamp contributes no current, preserving the accuracy of the linear-region behaviour.
-
-The 10 S conductance (vs. 1 S for the internal gain-stage clamp) provides a stiffer clamp at the output, appropriate for the lower-impedance output node.
+When the output exceeds a supply rail, a 10 S conductance activates to pull it back toward the rail. When within the supply range, no clamping current is applied. The clamp limits automatically follow `V(vdd)` and `V(vss)`, so the output swing adapts to any supply configuration without requiring parameter changes.
 
 ---
 
-## 6. Summary of Smooth Non-Linearities
+## 6. Known Limitations
 
-All non-linearities in the model use smooth, continuously differentiable functions. There are no `if/else` conditionals in the signal path. Four subsystems use `tanh`-based mechanisms:
+### 6.1 DC Sweep Hysteresis in Open-Loop (Comparator) Configurations
 
-| Subsystem | Location | Type | Key Parameters | Boundary |
-|-----------|----------|------|----------------|----------|
-| Slew rate limiter | n12 | tanh saturation | Slewavg | ±Slewavg |
-| Gain-stage voltage clamp | n3 | tanh conductance clamp | G=1 S, K=50 | ±Vilim |
-| Output current limiter | n2 | tanh conductance clamp | G=CSCALE (50 S), K=50 | ±ILMAX |
-| Output voltage clamp | out | tanh conductance clamp | G=10 S, K=50 | V(vdd), V(vss) |
+The model uses `if/else` conditionals in the slew rate limiter, current limiter, and output voltage clamp. These produce **discontinuous Jacobian derivatives** at the switching boundaries. In closed-loop (negative feedback) configurations this causes no problems because the feedback constrains the operating point to the linear region.
 
-The **slew rate limiter** uses a direct `tanh` saturation function, `Slewavg × tanh(V(n11) / Slewavg)`, which inherently provides unity gain for small signals and saturates at ±Slewavg. Its Jacobian is always bounded between 0 and 1.
+However, in **open-loop (comparator) configurations under DC sweep analysis**, the discontinuous derivatives cause the Newton–Raphson solver to become trapped at whichever supply rail it converges to first. The result is:
 
-The remaining three subsystems use the conductance clamp form:
+- **Forward DC sweep:** output stuck at LOW rail for the entire sweep
+- **Reverse DC sweep:** output stuck at HIGH rail for the entire sweep
+- **The output never transitions** between rails, regardless of the input voltage crossing the threshold
 
-```
-I_clamp = 0.5 × G × (1 + tanh(K × ΔV)) × ΔV
-```
+This is a fundamental convergence issue with the interaction between the hard-clipping non-linearities and the SPICE DC solver. The model produces correct results in:
 
-where:
-- **G** is the maximum clamp conductance
-- **K** controls the transition sharpness (K = 50 gives ≈ 40 mV transition width)
-- **ΔV** is the excursion beyond the clamp boundary
+- **Transient analysis** (including comparator-mode switching), because the time-stepping integrator can track transitions through the clipping boundaries
+- **Operating point (OP) analysis** at any fixed bias condition
+- **All closed-loop configurations** (buffers, amplifiers, integrators, etc.)
 
-When ΔV ≪ 0, the factor `(1 + tanh(K × ΔV))` → 0 and no clamp current flows. When ΔV ≫ 0, the factor → 2 and the clamp behaves as a linear conductance `G × ΔV`. The smooth transition ensures that the Jacobian matrix has no discontinuities.
+Resolving this limitation requires replacing the `if/else` non-linearities with smooth functions (e.g. `tanh`-based clamps) while preserving correct DC operating point convergence in complex multi-amplifier circuits. This is an area of ongoing work.
 
 ---
 
-## 7. Simulator Options for Transient Analysis
+## 7. Test Suite and Results
 
-Transient simulations that drive the output into clipping at the supply rails can encounter "timestep too small" convergence failures with ngspice's default settings. This occurs because the interaction between the output voltage clamp, the gain-stage integrator, and the slew rate limiter creates a stiff system at the clipping boundary.
+The model was verified against five standard test circuits at ±3 V supply (or asymmetric supply where noted), plus a comprehensive Xschem-generated testbench with a 0–3 V single supply.
 
-The following `.option` settings resolve this and are recommended for any transient simulation where the output is expected to clip:
-
-```spice
-.option method=gear reltol=5e-3 itl4=500 trtol=7
-```
-
-| Option | Value | Purpose |
-|--------|-------|---------|
-| `method=gear` | — | Use Gear (BDF) integration instead of the default trapezoidal rule. Gear is L-stable, making it more robust for stiff systems. |
-| `reltol=5e-3` | 0.5% | Relax the relative tolerance from the default 0.1% to 0.5%. This allows the solver to accept slightly less precise solutions at the clipping boundary without triggering timestep reduction. |
-| `itl4=500` | — | Increase the transient iteration limit from the default 10 to 500, giving the Newton–Raphson solver more attempts to converge at difficult operating points. |
-| `trtol=7` | — | Increase the transient truncation error tolerance from the default 7 (ngspice's default is already 7, but setting it explicitly ensures it is not overridden). This controls how aggressively the simulator reduces the timestep to control local truncation error. |
-
-These settings do not affect DC or AC analysis. They can safely be included in all testbenches. Simulations that do not clip at the rails will converge with or without these options.
-
----
-
-## 8. Test Suite and Results
-
-The model was verified against five standard test circuits at ±3 V supply (or asymmetric supply where noted), plus a comprehensive Xschem-generated testbench with a 0–3 V single supply. All tests produce `.dat` output files in the `test/` folder.
-
-### 8.1 Test 1 — Input Voltage Offset (DC)
+### 7.1 Test 1 — Input Voltage Offset (DC)
 
 **Circuit:** Non-inverting amplifier, gain = 11 (R1 = 1 kΩ, R2 = 10 kΩ), input grounded, ±3 V supply.
 
@@ -407,7 +346,7 @@ The model was verified against five standard test circuits at ±3 V supply (or a
 
 **Expected:** VOFF parameter = 0.700 mV. The measured 0.764 mV includes the small effect of input bias current flowing through the feedback network, consistent with the model.
 
-### 8.2 Test 2 — Open-Loop Gain and Bandwidth (AC)
+### 7.2 Test 2 — Open-Loop Gain and Bandwidth (AC)
 
 **Circuit:** Open-loop configuration with zero offsets (VOFF = 0, IOFF ≈ 0, IB ≈ 0), 1 GΩ load, ±3 V supply.
 
@@ -421,7 +360,7 @@ The model was verified against five standard test circuits at ±3 V supply (or a
 
 The open-loop response shows the expected dominant-pole roll-off at 20 dB/decade, transitioning to 40 dB/decade beyond FP2.
 
-### 8.3 Test 3 — Slew Rate (Transient)
+### 7.3 Test 3 — Slew Rate (Transient)
 
 **Circuit:** Inverting amplifier, gain = −1 (R1 = R2 = 10 kΩ), driven by a ±1 V square wave at 10 kHz, ±3 V supply.
 
@@ -429,25 +368,23 @@ The open-loop response shows the expected dominant-pole roll-off at 20 dB/decade
 
 | Measurement | Value | Expected |
 |-------------|-------|----------|
-| Positive slew rate | 511 kV/s | 500 kV/s (PSRT) |
-| Negative slew rate | 511 kV/s | 500 kV/s (NSRT) |
+| Positive slew rate | 498 kV/s | 500 kV/s (PSRT) |
+| Negative slew rate | 498 kV/s | 500 kV/s (NSRT) |
 
-The measured slew rate is 2.3% above the target, which reflects the soft roll-off inherent in the `tanh` saturation function. The `tanh` begins compressing the signal slightly before the threshold, resulting in a marginally higher effective slew rate than the hard-clipped ideal. This is well within acceptable tolerance.
-
-### 8.4 Test 4 — Output Voltage Limiting (Transient)
+### 7.4 Test 4 — Output Voltage Limiting (Transient)
 
 **Circuit:** Non-inverting amplifier, gain = 11, driven by a 1 V peak 1 kHz sine wave. Asymmetric supplies: VDD = +3 V, VSS = −2 V.
 
-**Method:** Transient analysis, 3 ms. Output clips at both supply rails. This test requires the simulator options described in §7 to avoid timestep convergence failures.
+**Method:** Transient analysis, 3 ms. Output clips at both supply rails.
 
 | Measurement | Value | Expected |
 |-------------|-------|----------|
-| V(out) max | +3.008 V | ≈ VDD = +3 V |
-| V(out) min | −2.008 V | ≈ VSS = −2 V |
+| V(out) max | +3.005 V | ≈ VDD = +3 V |
+| V(out) min | −2.005 V | ≈ VSS = −2 V |
 
-The output clips at each supply rail with approximately 8 mV of overshoot due to the smooth tanh transition. The asymmetric supplies confirm that the output clamp correctly tracks each rail independently.
+The output clips at each supply rail with approximately 5 mV of overshoot. The asymmetric supplies confirm that the output clamp correctly tracks each rail independently.
 
-### 8.5 Test 5 — Unity-Gain Buffer (DC Sweep)
+### 7.5 Test 5 — Unity-Gain Buffer (DC Sweep)
 
 **Circuit:** Voltage follower (output fed back to inverting input), 1 MΩ load, 0–3 V single supply.
 
@@ -456,37 +393,22 @@ The output clips at each supply rail with approximately 8 mV of overshoot due to
 | Measurement | Value | Expected |
 |-------------|-------|----------|
 | Tracking error (max) | +0.789 mV | ≈ VOFF = 0.7 mV |
-| Tracking error (min) | +0.703 mV | ≈ VOFF = 0.7 mV |
+| Tracking error (min) | +0.700 mV | ≈ VOFF = 0.7 mV |
 | V(out) at mid-supply | 1.5007 V | 1.5 V + VOFF |
 
-The output tracks the input across the full 0–3 V range with a constant offset equal to the input offset voltage. No convergence issues or parasitic equilibria.
+The output tracks the input across the full 0–3 V range with a constant offset equal to the input offset voltage. No convergence issues.
 
-### 8.6 Test 6 — Xschem Testbench (Combined)
+### 7.6 Test 6 — Xschem Testbench (Combined)
 
-**Circuit:** The user's Xschem-generated testbench (`test_opamp_va.spice`) instantiates two op-amps on a 0–3 V single supply: one as a unity-gain buffer (XU1, output Y fed back to inverting input) and one as an open-loop comparator (XU2, output Z, with reference voltage VB on the inverting input). A DC sweep of V3 from 0 to 3 V (0.01 V steps) is performed at six values of VB (1.0 to 2.0 V in 0.2 V steps), using `reset` and `alterparam` to iterate.
+**Circuit:** The user's Xschem-generated testbench (`test_opamp_va.spice`) instantiates two op-amps on a 0–3 V single supply: one as a unity-gain buffer (XU1, output Y) and one as an open-loop comparator (XU2, output Z).
 
-**Result:** All seven analyses completed successfully (1 OP + 6 DC sweeps × 301 data points each, no convergence failures).
+**Unity-gain buffer (Y):** Tracks the input correctly across the full sweep range with the expected offset voltage.
 
-**Unity-gain buffer (Y) — correct at all VB values:**
-
-The buffer tracks the input across the full 0–3 V sweep with a constant offset of 0.70–0.79 mV (= VOFF) at every VB value. No tracking failures or parasitic equilibria.
-
-**Comparator (Z) — correct at all VB values:**
-
-| VB (V) | Switch Point (V) | V(Z) Low (mV) | V(Z) High (V) |
-|--------|-------------------|----------------|----------------|
-| 1.0 | 1.005 | −8 | 3.008 |
-| 1.2 | 1.205 | −8 | 3.008 |
-| 1.4 | 1.405 | −8 | 3.008 |
-| 1.6 | 1.605 | −8 | 3.008 |
-| 1.8 | 1.805 | −8 | 3.008 |
-| 2.0 | 2.005 | −8 | 3.008 |
-
-The comparator switches cleanly at each threshold with no hysteresis. The output swings from ≈ 0 V (VSS) to ≈ 3 V (VDD). The switch-point offset of +5 mV from VB is consistent with the model's input offset voltage.
+**Comparator (Z):** Affected by the DC sweep hysteresis issue described in §6.1. The output remains stuck at one rail throughout each DC sweep and does not transition. The comparator operates correctly in transient analysis.
 
 ---
 
-## 9. File Organisation
+## 8. File Organisation
 
 ```
 opamp/
@@ -498,11 +420,7 @@ opamp/
 │   ├── test_ac_gain.spice         Test 2: AC gain/bandwidth (±3 V)
 │   ├── test_transient_slew.spice  Test 3: Slew rate (±3 V)
 │   ├── test_voltage_limit.spice   Test 4: Output voltage limiting (+3/−2 V)
-│   ├── test_unity_gain.spice      Test 5: Unity-gain buffer DC sweep (0–3 V)
-│   ├── test_ac_gain.dat           AC gain/phase output
-│   ├── test_transient_slew.dat    Slew rate waveform output
-│   ├── test_unity_gain.dat        Unity-gain DC sweep output
-│   └── test_voltage_limit.dat     Voltage limit waveform output
+│   └── test_unity_gain.spice      Test 5: Unity-gain buffer DC sweep (0–3 V)
 ├── test_opamp_va.spice            Test 6: Xschem combined testbench (0–3 V)
 └── docs/
     └── Model-Implementation-Report.md
@@ -510,7 +428,7 @@ opamp/
 
 ---
 
-## 10. Usage
+## 9. Usage
 
 ### Compilation
 
@@ -533,23 +451,3 @@ N1 inp inn out vdd vss myamp
 ```
 
 Instances are created with the `N` prefix (OSDI device). Parameters can be overridden on the `.model` card. The `pre_osdi` directive must appear in a `.control` block before the circuit definition.
-
-For transient simulations where the output may clip at the supply rails, include the convergence options:
-
-```spice
-.option method=gear reltol=5e-3 itl4=500 trtol=7
-```
-
-See §7 for details.
-
-### Parameter Tuning Notes
-
-**VILIMSF** controls the internal gain-stage voltage clamp as a multiple of the slew-rate threshold:
-
-```
-Vilim = VILIMSF × max(Slewratepositive, Slewratenegative)
-```
-
-With the default parameters, `Slewratepositive ≈ 0.08 V`, giving `Vilim ≈ 80 V` at `VILIMSF = 1000`. The clamp is inactive during normal closed-loop operation and only activates in open-loop or comparator configurations to bound internal node voltages for convergence. If the model is used at higher supply voltages (e.g. ±15 V), `VILIMSF` may need to be increased to provide adequate headroom above the supply range.
-
-**CSCALE** controls the stiffness of the output current clamp (in siemens). The default value of 50 provides soft current limiting that prevents the output current from significantly exceeding ILMAX while maintaining smooth derivatives.
