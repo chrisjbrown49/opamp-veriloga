@@ -63,17 +63,11 @@ module opamp_module(inp, inn, out, vdd, vss);
     (* desc="Current limit scaling factor" *)
     parameter real CSCALE = 50 from [0 : inf);
 
-    (* desc="Gain-stage clamp as multiple of slew-rate threshold" *)
-    parameter real VILIMSF = 1000.0 from [1 : inf);
-
     real RP1, CP1, RP2, CP2;
     real Rdiff, Voffset;
     real CMRR0, CMgain, CCM;
     real Slewratepositive, Slewratenegative;
     real MTWOPI;
-    real Vhi, Vlo, Vn3hi, Vn3lo, Vilim;
-    real Iohi, Iolo;
-    real Slewavg;
 
     analog begin
         MTWOPI = 6.28318530717958647693;
@@ -125,52 +119,58 @@ module opamp_module(inp, inn, out, vdd, vss);
         I(n11) <+ -V(n7, n9);
         I(n11) <+ V(n11);
 
-        // Slew rate limiting stage: tanh saturation — unity gain for small
-        // signals, smooth limiting at ±Slewrate for large overdrive.
-        Slewavg = (Slewratepositive + Slewratenegative) / 2.0;
-        I(n12) <+ -Slewavg * tanh(V(n11) / Slewavg);
+        // Slew rate limiting stage
+        if (V(n11) > Slewratepositive)
+            I(n12) <+ -Slewratepositive;
+        else if (V(n11) < -Slewratenegative)
+            I(n12) <+ Slewratenegative;
+        else
+            I(n12) <+ -V(n11);
         I(n12) <+ V(n12);
-
-        // Gain-stage voltage clamp limit derived from the slew-rate threshold.
-        Vilim = VILIMSF * max(Slewratepositive, Slewratenegative);
 
         // First pole (gain stage)
         I(n3) <+ -V(n12);
         I(n3) <+ V(n3) / RP1;
         I(n3) <+ ddt(CP1 * V(n3));
 
-        // Voltage clamp on first pole output — bounds V(n3) to ±Vilim,
-        // preventing extreme internal voltages in open-loop configurations.
-        Vn3hi = V(n3) - Vilim;
-        Vn3lo = (-Vilim) - V(n3);
-        I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3hi)) * Vn3hi;
-        I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3lo)) * (-Vn3lo);
-
         // Second pole
         I(n5) <+ -V(n3);
         I(n5) <+ V(n5) / RP2;
         I(n5) <+ ddt(CP2 * V(n5));
 
-        // Signal pass-through from second pole to output driver
-        I(n4) <+ -V(n5);
-        I(n4) <+ V(n4);
+        // Current limiter stage
+        if (V(n2, out) >= ILMAX)
+        begin
+            I(n4) <+ -V(n5);
+            I(n4) <+ CSCALE * V(n5) * (V(n2, out) - ILMAX);
+            I(n4) <+ V(n4);
+        end
+        else if (V(n2, out) <= -ILMAX)
+        begin
+            I(n4) <+ -V(n5);
+            I(n4) <+ -CSCALE * V(n5) * (V(n2, out) + ILMAX);
+            I(n4) <+ V(n4);
+        end
+        else
+        begin
+            I(n4) <+ -V(n5);
+            I(n4) <+ V(n4);
+        end
 
         // Output resistance: (RO-1) ohm + 1 ohm current sense = RO total
         I(n4, n2) <+ V(n4, n2) / (RO - 1);
         I(n2, out) <+ V(n2, out);
 
-        // Output current limiter: tanh-based clamp on the 1 ohm sense voltage.
-        // Absorbs excess current at n2 when |V(n2,out)| exceeds ILMAX,
-        // independent of V(n5) magnitude to avoid sign-flip pathology.
-        Iohi = V(n2, out) - ILMAX;
-        Iolo = (-ILMAX) - V(n2, out);
-        I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iohi)) * Iohi;
-        I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iolo)) * (-Iolo);
-
-        // Voltage limiter stage: smooth tanh-based clamp to supply rails.
-        Vhi = V(out) - V(vdd);
-        Vlo = V(vss) - V(out);
-        I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vhi)) * Vhi;
-        I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vlo)) * (-Vlo);
+        // Voltage limiter stage: clamp output to supply rails
+        if (V(out) > V(vdd))
+        begin
+            I(out) <+ -10.0 * V(vdd);
+            I(out) <+ 10.0 * V(out);
+        end
+        else if (V(out) < V(vss))
+        begin
+            I(out) <+ -10.0 * V(vss);
+            I(out) <+ 10.0 * V(out);
+        end
     end
 endmodule

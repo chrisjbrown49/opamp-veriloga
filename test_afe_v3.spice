@@ -1,0 +1,57 @@
+** sch_path: /home/chris/.xschem/xschem_library/custom/test_afe_v3.sch
+**.subckt test_afe_v3
+V2 VDD GND 3.0
+V3 VREF GND dc 3.0 pwl 0 0 50u 3 100u 0
+
+V4 VB1 GND VB1
+V1 VB2 GND VB2
+XM1 D VREF S S sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 ad=0.29 as=0.29 pd=2.58 ps=2.58 nrd=0.29 nrs=0.29 sa=0 sb=0 sd=0 mult=1 m=1
+XM2 S net2 A A sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 ad=0.29 as=0.29 pd=2.58 ps=2.58 nrd=0.29 nrs=0.29 sa=0 sb=0 sd=0 mult=1 m=1
+R1 A GND 10k m=1
+R3 net2 net1 1k m=1
+R2 B Z 10k m=1
+R4 B net3 30k m=1
+R5 net4 D 10k m=1
+R6 C net4 10k m=1
+R7 C B 10k m=1
+V5 GND VSS 3.0
+XU1 VB2 net3 net3 VDD VSS opamp_cell
+XU2 S Z Z VDD VSS opamp_cell
+XU3 VB1 A net1 VDD VSS opamp_cell
+XU5 GND net4 D VDD VSS opamp_cell
+XU4 GND B C VDD VSS opamp_cell
+**** begin user architecture code
+.lib /usr/local/share/pdk/sky130B/libs.tech/combined/sky130.lib.spice tt_mm
+**** end user architecture code
+**.ends
+.GLOBAL VDD
+.GLOBAL GND
+**** begin user architecture code
+
+
+.option temp = 25
+.option method=gear reltol=5e-3 itl4=500 trtol=7
+.save r1[i]
+.param VB1 = 1.5
+.param VB2 = 1.5
+.control
+  save all
+  tran 100n 100u
+  write test_afe.raw
+  quit 0
+.endc
+
+
+
+.subckt opamp_cell INP INN OUT VDD VSS
+N1 inp inn out vdd vss opamp_model
+.ends opamp_cell
+
+.model opamp_model opamp_module
+
+.control
+pre_osdi /home/chris/.xschem/xschem_library/custom/opamp.osdi
+.endc
+
+**** end user architecture code
+.end
