@@ -1,0 +1,30 @@
+* Test 1: Input Voltage Offset - DC Analysis
+* Non-inverting amplifier (gain=1+R2/R1=11) with grounded input
+* The output voltage reveals the input offset voltage amplified by the gain.
+* Reference: Brinson report Figure 1
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+.model ua741 opamp_module
+
+* Power supplies
+Vdd vdd 0 DC 3
+Vss vss 0 DC -3
+
+* Non-inverting amplifier, gain = 1 + R2/R1 = 11
+Vin inp 0 DC 0
+R1 inn 0 1k
+R2 inn out 10k
+N1 inp inn out vdd vss ua741
+
+.control
+op
+print v(out)
+let voff_measured = v(out) / 11
+print voff_measured
+quit
+.endc
+
+.end

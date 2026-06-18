@@ -1,0 +1,55 @@
+** sch_path: /home/chris/.xschem/xschem_library/custom/test_opamp_va.sch
+**.subckt test_opamp_va
+V1 VSS 0 0.0
+V2 VDD 0 3.0
+V3 A 0 dc 1.5 pwl 0 1.4 49.9u 1.4 50.1u 1.6 99.9u 1.6 100.1u 1.4
+
+V4 B 0 'VB'
+R1 Z VSS 1MEG m=1
+C1 Z VSS 1f m=1
+XU1 A Y Y VDD VSS opamp_cell
+XU2 A B Z VDD VSS opamp_cell
+R2 Y VSS 1MEG m=1
+C2 Y VSS 1f m=1
+**.ends
+**** begin user architecture code
+
+
+.options savecurrents
+.option temp = 25
+.param VB = 1.5
+.control
+  let start_v = 1.0
+  let stop_v = 2.0
+  let step_v = 0.2
+  let v = start_v
+  save all
+  op
+  remzerovec
+  write test_opamp.raw
+  set appendwrite
+  dowhile v <= stop_v
+    alterparam VB = $&v
+    reset
+    dc V3 0 3 0.01
+    remzerovec
+    write test_opamp.raw
+    let v = v + step_v
+  end
+  quit 0
+.endc
+
+
+
+.subckt opamp_cell INP INN OUT VDD VSS
+N1 inp inn out vdd vss opamp_model
+.ends opamp_cell
+
+.model opamp_model opamp_module
+
+.control
+pre_osdi /home/chris/.xschem/xschem_library/custom/opamp.osdi
+.endc
+
+**** end user architecture code
+.end

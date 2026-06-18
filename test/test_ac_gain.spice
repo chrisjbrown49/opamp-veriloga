@@ -1,0 +1,36 @@
+* Test 2: Open-Loop Differential Voltage Gain - AC Analysis
+* Zero-offset model for clean open-loop measurement at the DC operating point.
+* Reference: Brinson report Figure 5
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+* Use zero offsets so the DC operating point stays in the linear region
+.model ua741_ac opamp_module AOLDC=106.0 GBP=1e6 FP2=3e6 VOFF=0 IOFF=1e-20 IB=1e-20 CD=1e-20
+
+* Power supplies
+Vdd vdd 0 DC 3
+Vss vss 0 DC -3
+
+V1 inp 0 DC 0 AC 1
+Rload out 0 1G
+N1 inp 0 out vdd vss ua741_ac
+
+.control
+op
+print v(out)
+ac dec 20 0.1 100meg
+let gain_db = db(v(out))
+let phase_deg = 180/PI * cph(v(out))
+wrdata test/test_ac_gain.dat gain_db phase_deg
+meas ac dc_gain_db FIND gain_db AT=0.1
+meas ac unity_bw WHEN gain_db=0 CROSS=1
+meas ac gain_at_fp2 FIND gain_db AT=3e6
+print dc_gain_db
+print unity_bw
+print gain_at_fp2
+quit
+.endc
+
+.end

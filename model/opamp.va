@@ -1,0 +1,176 @@
+// Verilog-A Modular Macromodel for Operational Amplifiers
+// Based on the Qucs-Brinson model by Mike Brinson
+// Default parameters are for a typical UA741 operational amplifier.
+//
+// Copyright (C) 2007, Mike Brinson, mbrin72043@yahoo.co.uk
+// Adapted for OpenVAF/ngspice compatibility.
+//
+// This is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2, or (at your option)
+// any later version.
+
+`include "disciplines.vams"
+`include "constants.vams"
+
+module opamp_module(inp, inn, out, vdd, vss);
+    inout inp, inn, out, vdd, vss;
+    electrical inp, inn, out, vdd, vss;
+    electrical n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12;
+
+    (* desc="Gain bandwidth product", units="Hz" *)
+    parameter real GBP = 1e6 from [1 : inf);
+
+    (* desc="Open loop DC gain", units="dB" *)
+    parameter real AOLDC = 106.0 from [0.01 : inf);
+
+    (* desc="Second pole frequency", units="Hz" *)
+    parameter real FP2 = 3e6 from [0.01 : inf);
+
+    (* desc="Output resistance", units="Ohm" *)
+    parameter real RO = 75 from [0.01 : inf);
+
+    (* desc="Differential input capacitance", units="F" *)
+    parameter real CD = 1e-12 from [1e-20 : inf);
+
+    (* desc="Differential input resistance", units="Ohm" *)
+    parameter real RD = 2e6 from [0.01 : inf);
+
+    (* desc="Input offset current", units="A" *)
+    parameter real IOFF = 20e-9 from [1e-20 : inf);
+
+    (* desc="Input bias current", units="A" *)
+    parameter real IB = 80e-9 from [1e-20 : inf);
+
+    (* desc="Input offset voltage", units="V" *)
+    parameter real VOFF = 7e-4 from [0 : inf);
+
+    (* desc="Common-mode rejection ratio at DC", units="dB" *)
+    parameter real CMRRDC = 90.0 from [1 : inf);
+
+    (* desc="Common-mode zero corner frequency", units="Hz" *)
+    parameter real FCM = 200 from [0.01 : inf);
+
+    (* desc="Positive slew rate", units="V/s" *)
+    parameter real PSRT = 5e5 from [1 : inf);
+
+    (* desc="Negative slew rate", units="V/s" *)
+    parameter real NSRT = 5e5 from [1 : inf);
+
+    (* desc="Maximum DC output current", units="A" *)
+    parameter real ILMAX = 35e-3 from [1e-9 : inf);
+
+    (* desc="Current limit scaling factor" *)
+    parameter real CSCALE = 50 from [0 : inf);
+
+    (* desc="Gain-stage clamp as multiple of slew-rate threshold" *)
+    parameter real VILIMSF = 1000.0 from [1 : inf);
+
+    real RP1, CP1, RP2, CP2;
+    real Rdiff, Voffset;
+    real CMRR0, CMgain, CCM;
+    real Slewratepositive, Slewratenegative;
+    real MTWOPI;
+    real Vhi, Vlo, Vn3hi, Vn3lo, Vilim;
+    real Iohi, Iolo;
+    real Slewavg;
+
+    analog begin
+        MTWOPI = 6.28318530717958647693;
+
+        Voffset = VOFF / 2;
+        Rdiff = RD / 2;
+        CMRR0 = pow(10, CMRRDC / 20);
+        CMgain = 1e6 / CMRR0;
+        CCM = 1.0 / (MTWOPI * 1e6 * FCM);
+        RP1 = pow(10, AOLDC / 20);
+        CP1 = 1 / (MTWOPI * GBP);
+        RP2 = 1;
+        CP2 = 1 / (MTWOPI * FP2);
+        Slewratepositive = PSRT / (MTWOPI * GBP);
+        Slewratenegative = NSRT / (MTWOPI * GBP);
+
+        // High-impedance path on supply pins (voltage reference only)
+        I(vdd) <+ V(vdd) * 1e-12;
+        I(vss) <+ V(vss) * 1e-12;
+
+        // Input voltage offset
+        I(inp, n7) <+ V(inp, n7);
+        I(inp, n7) <+ Voffset;
+
+        I(inn, n9) <+ V(inn, n9);
+        I(inn, n9) <+ -Voffset;
+
+        // Input bias currents
+        I(n7) <+ IB;
+        I(n9) <+ IB;
+
+        // Input current offset
+        I(n7, n9) <+ IOFF / 2;
+
+        // Input differential resistance and capacitance
+        I(n7, n8) <+ V(n7, n8) / Rdiff;
+        I(n9, n8) <+ V(n9, n8) / Rdiff;
+        I(n7, n9) <+ ddt(CD * V(n7, n9));
+
+        // Common-mode stage
+        I(n6) <+ -CMgain * V(n8);
+        I(n6) <+ V(n6);
+        I(n6, n10) <+ V(n6, n10) / 1e6;
+        I(n6, n10) <+ ddt(CCM * V(n6, n10));
+        I(n10) <+ V(n10);
+
+        // Differential and common-mode signal adder
+        I(n11) <+ -V(n10);
+        I(n11) <+ -V(n7, n9);
+        I(n11) <+ V(n11);
+
+        // Slew rate limiting stage: tanh saturation — unity gain for small
+        // signals, smooth limiting at ±Slewrate for large overdrive.
+        Slewavg = (Slewratepositive + Slewratenegative) / 2.0;
+        I(n12) <+ -Slewavg * tanh(V(n11) / Slewavg);
+        I(n12) <+ V(n12);
+
+        // Gain-stage voltage clamp limit derived from the slew-rate threshold.
+        Vilim = VILIMSF * max(Slewratepositive, Slewratenegative);
+
+        // First pole (gain stage)
+        I(n3) <+ -V(n12);
+        I(n3) <+ V(n3) / RP1;
+        I(n3) <+ ddt(CP1 * V(n3));
+
+        // Voltage clamp on first pole output — bounds V(n3) to ±Vilim,
+        // preventing extreme internal voltages in open-loop configurations.
+        Vn3hi = V(n3) - Vilim;
+        Vn3lo = (-Vilim) - V(n3);
+        I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3hi)) * Vn3hi;
+        I(n3) <+ 0.5 * 1.0 * (1.0 + tanh(50.0 * Vn3lo)) * (-Vn3lo);
+
+        // Second pole
+        I(n5) <+ -V(n3);
+        I(n5) <+ V(n5) / RP2;
+        I(n5) <+ ddt(CP2 * V(n5));
+
+        // Signal pass-through from second pole to output driver
+        I(n4) <+ -V(n5);
+        I(n4) <+ V(n4);
+
+        // Output resistance: (RO-1) ohm + 1 ohm current sense = RO total
+        I(n4, n2) <+ V(n4, n2) / (RO - 1);
+        I(n2, out) <+ V(n2, out);
+
+        // Output current limiter: tanh-based clamp on the 1 ohm sense voltage.
+        // Absorbs excess current at n2 when |V(n2,out)| exceeds ILMAX,
+        // independent of V(n5) magnitude to avoid sign-flip pathology.
+        Iohi = V(n2, out) - ILMAX;
+        Iolo = (-ILMAX) - V(n2, out);
+        I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iohi)) * Iohi;
+        I(n2) <+ 0.5 * CSCALE * (1.0 + tanh(50.0 * Iolo)) * (-Iolo);
+
+        // Voltage limiter stage: smooth tanh-based clamp to supply rails.
+        Vhi = V(out) - V(vdd);
+        Vlo = V(vss) - V(out);
+        I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vhi)) * Vhi;
+        I(out) <+ 0.5 * 10.0 * (1.0 + tanh(50.0 * Vlo)) * (-Vlo);
+    end
+endmodule

@@ -1,0 +1,35 @@
+* Test 4: Output Voltage Limiting - Transient Analysis
+* Non-inverting amplifier driven into clipping at the supply rails.
+* Output should clip at V(vdd) and V(vss).
+* Reference: Brinson report Figure 11
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+.model ua741 opamp_module
+
+* Asymmetric supplies to verify clipping tracks each rail independently
+Vdd vdd 0 DC 3
+Vss vss 0 DC -2
+
+* Non-inverting amplifier, gain = 1 + R2/R1 = 11
+R1 inn 0 1k
+R2 inn out 10k
+Vin inp 0 SIN(0 1 1k)
+
+N1 inp inn out vdd vss ua741
+
+.option method=gear reltol=5e-3 itl4=500 trtol=7
+
+.control
+tran 1u 3m
+wrdata test/test_voltage_limit.dat v(inp) v(out)
+meas tran vmax MAX v(out)
+meas tran vmin MIN v(out)
+print vmax
+print vmin
+quit
+.endc
+
+.end

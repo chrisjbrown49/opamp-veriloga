@@ -1,0 +1,43 @@
+* Test 5: Unity-Gain Buffer - DC Sweep
+* Unity-gain (voltage follower) configuration: output fed back to inverting input.
+* DC sweep of input from 0 to 3V in 0.01V steps with 0-3V single supply.
+* The output should track the input with only the input offset voltage as error.
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+.model ua741 opamp_module
+
+* Power supplies
+Vdd vdd 0 DC 3
+Vss vss 0 DC 0
+
+* Unity-gain buffer: output fed back to inverting input
+Vin inp 0 DC 1.5
+N1 inp out out vdd vss ua741
+
+* Load
+Rload out vss 1MEG
+
+.control
+dc Vin 0 3 0.01
+
+let Y_err = v(out) - v(inp)
+let max_err = maximum(Y_err)
+let min_err = minimum(Y_err)
+
+echo "=== Unity-Gain Buffer DC Sweep ==="
+print max_err min_err
+
+meas dc mid_out FIND v(out) AT=1.5
+let mid_err = mid_out - 1.5
+echo "Tracking error at mid-supply:"
+print mid_err
+
+wrdata test/test_unity_gain.dat v(inp) v(out)
+
+quit
+.endc
+
+.end

@@ -1,0 +1,36 @@
+* Test 3: Slew Rate Limiting - Transient Analysis
+* Inverting amplifier with gain=-1, driven by a 10kHz square wave.
+* Reference: Brinson report Figure 9
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+.model ua741 opamp_module
+
+* Power supplies
+Vdd vdd 0 DC 3
+Vss vss 0 DC -3
+
+* Inverting amplifier, gain = -R2/R1 = -1
+R1 inp in_n 10k
+R2 in_n out 10k
+Vin inp 0 PULSE(-1 1 0 1n 1n 50u 100u)
+
+N1 0 in_n out vdd vss ua741
+
+.control
+tran 0.1u 300u
+wrdata test/test_transient_slew.dat v(inp) v(out)
+meas tran t_rise_start WHEN v(out)=-0.5 RISE=1
+meas tran t_rise_end WHEN v(out)=0.5 RISE=1
+let pos_slew = 1 / (t_rise_end - t_rise_start)
+print pos_slew
+meas tran t_fall_start WHEN v(out)=0.5 FALL=1
+meas tran t_fall_end WHEN v(out)=-0.5 FALL=1
+let neg_slew = 1 / (t_fall_end - t_fall_start)
+print neg_slew
+quit
+.endc
+
+.end
