@@ -1,0 +1,113 @@
+* Test 6: Floating System Ground - Unity-Gain Buffer
+*
+* Topology
+* --------
+*  VBAT  VDD-VSS = 3V  (battery; both terminals float relative to gnd)
+*  RGND  VSS-0   = 1T  (weak DC anchor to simulator ground - negligible effect)
+*  CGND  VSS-0   = 100p (transient stability aid - open circuit for DC)
+*  VIN   INP-VSS = swept value (input referenced to the floating system ground)
+*  N1    unity-gain buffer (inn tied to out)
+*  RLOAD OUT-0   = 10k (load to simulator GND representing body/patient reference)
+*
+* Expected behaviour
+* ------------------
+*  The 10k load pulls V(out) toward simulator GND (0V).
+*  The op-amp unity-gain feedback forces V(inp) = V(out) ≈ 0V.
+*  Since V(inp) = V(VSS) + VIN, the floating system ground must settle at:
+*
+*    V(VSS) ≈ -VIN                          (to ~10 ppb, limited by 10k/1T ratio)
+*    V(VDD) ≈ 3 - VIN                       (VSS + battery voltage)
+*    V(out) ≈ 0 V                           (body/patient reference)
+*    V(INP) ≈ 0 V                           (= VSS + VIN ≈ -VIN + VIN)
+*
+*  Example at VIN = 1.5V (mid-supply):
+*    V(VSS) ≈ -1.500 V,  V(VDD) ≈ 1.500 V,  V(out) ≈ 0.000 V
+
+.control
+pre_osdi ../model/opamp.osdi
+.endc
+
+.model ua741 opamp_module
+
+* Battery: VDD - VSS = 3V; neither terminal tied to simulator ground.
+VBAT VDD VSS 3.0
+
+* Weak VSS anchor to simulator ground.
+* RGND provides the only DC Jacobian path from VSS to 0V; its large value
+* (1 TOhm) means it carries ~1.5 pA and shifts V(VSS) by only ~1.5 uV.
+* CGND aids transient settling without affecting DC analyses.
+RGND VSS 0 1T
+CGND VSS 0 100p
+
+* Input signal referenced to the floating system ground (VSS).
+* Starting value 1.5V = mid-supply; swept in the analysis below.
+VIN INP VSS 1.5
+
+* Unity-gain buffer: inverting input (port 2) tied directly to output (port 3).
+N1 INP OUT OUT VDD VSS ua741
+
+* Output connected to body/patient reference (simulator GND) via 10k.
+RLOAD OUT 0 10k
+
+* Initial conditions: give the NR solver a starting point near the solution.
+.ic V(VDD)=1.5 V(VSS)=-1.5 V(OUT)=0 V(INP)=0
+
+.control
+  save all
+
+  * -----------------------------------------------------------------------
+  * Analysis 1: DC operating point at VIN = 1.5V
+  * -----------------------------------------------------------------------
+  op
+
+  echo "=== DC Operating Point (VIN = 1.5 V above VSS) ==="
+  print V(VSS) V(VDD) V(out) V(INP)
+
+  let floating_gnd_err = V(VSS) - (-1.5)
+  let unity_gain_err   = V(out) - V(INP)
+
+  echo "floating_gnd_err  (expect ~0.000 V):"
+  print floating_gnd_err
+  echo "unity_gain_err    (expect ~0.000 V):"
+  print unity_gain_err
+
+  * -----------------------------------------------------------------------
+  * Analysis 2: DC sweep, VIN = 0.2 V to 2.5 V
+  * V(VSS) should track -VIN; V(out) should stay near 0V throughout.
+  * Upper limit 2.6V keeps the output at least 0.4V inside the supply rails.
+  * The sweep goes to 2.6 so that AT=2.5 falls safely inside the interval.
+  * -----------------------------------------------------------------------
+  dc VIN 0.2 2.6 0.05
+
+  meas dc vss_at_low  find V(VSS) at=0.5
+  meas dc vss_at_mid  find V(VSS) at=1.5
+  meas dc vss_at_high find V(VSS) at=2.5
+  meas dc out_at_mid  find V(out) at=1.5
+  meas dc inp_at_mid  find V(INP) at=1.5
+
+  echo ""
+  echo "=== DC Sweep: V(VSS) should track -VIN ==="
+  echo "vss_at_low   (VIN=0.5, expect -0.500):"
+  print vss_at_low
+  echo "vss_at_mid   (VIN=1.5, expect -1.500):"
+  print vss_at_mid
+  echo "vss_at_high  (VIN=2.5, expect -2.500):"
+  print vss_at_high
+  echo "out_at_mid   (VIN=1.5, expect ~0.000):"
+  print out_at_mid
+  echo "inp_at_mid   (VIN=1.5, expect ~0.000):"
+  print inp_at_mid
+
+  * Max unity-gain tracking error across the full sweep
+  let sweep_err = v(out) - v(INP)
+  let max_sweep_err = maximum(abs(sweep_err))
+  echo ""
+  echo "Max unity-gain tracking error across sweep (expect < 2 mV):"
+  print max_sweep_err
+
+  wrdata test/test_floating_ground.dat v(INP) v(out) v(VSS) v(VDD)
+
+  quit
+.endc
+
+.end

@@ -5,6 +5,21 @@
 // Copyright (C) 2007, Mike Brinson, mbrin72043@yahoo.co.uk
 // Adapted for OpenVAF/ngspice compatibility.
 //
+// Modifications for floating-supply / floating-ground operation:
+//   Mod 1 - RPULL: pull resistors from output to both supply rails provide a
+//            DC Jacobian path needed when the supply rails float relative to
+//            simulator ground (e.g. battery-powered implantable devices).
+//   Mod 2 - Supply stubs changed from ground-referenced (I(vdd) <+ V(vdd)*eps)
+//            to a between-rail path (I(vdd,vss) <+ V(vdd,vss)*eps) so the model
+//            itself imposes no absolute-ground anchor on the supply rails.
+//   Mod 3 - Output stage redesigned as a pair of voltage-controlled conductances
+//            from VDD and VSS to the output.  The Thevenin equivalent seen at the
+//            output is unchanged (V_th = V(n4), R_th = RO), but drive current now
+//            flows through the supply pins rather than through absolute ground.
+//            As a side-effect, the if/else current limiter and voltage clamp are
+//            replaced with smooth equivalents (smooth_max via sqrt), which also
+//            improves DC-sweep convergence in open-loop / comparator configurations.
+//
 // This is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation; either version 2, or (at your option)
@@ -27,8 +42,10 @@ module opamp_module(inp, inn, out, vdd, vss);
     (* desc="Second pole frequency", units="Hz" *)
     parameter real FP2 = 3e6 from [0.01 : inf);
 
+    // Must be > 1 because the output stage uses (RO-1) as the pull resistance
+    // with a 1-ohm series sense resistor to give a total Thevenin impedance of RO.
     (* desc="Output resistance", units="Ohm" *)
-    parameter real RO = 75 from [0.01 : inf);
+    parameter real RO = 75 from [2 : inf);
 
     (* desc="Differential input capacitance", units="F" *)
     parameter real CD = 1e-12 from [1e-20 : inf);
@@ -63,11 +80,22 @@ module opamp_module(inp, inn, out, vdd, vss);
     (* desc="Current limit scaling factor" *)
     parameter real CSCALE = 50 from [0 : inf);
 
+    // Mod 1: pull resistors from output to each supply rail.
+    // Provide a DC Jacobian path for floating-supply simulations and model
+    // real output-stage leakage to both rails.  At 1 MOhm the quiescent
+    // current is ~1.5 uA per rail for a 3 V supply, negligible for most loads.
+    (* desc="Output pull resistor to each supply rail", units="Ohm" *)
+    parameter real RPULL = 1e6 from [1e3 : inf);
+
     real RP1, CP1, RP2, CP2;
     real Rdiff, Voffset;
     real CMRR0, CMgain, CCM;
     real Slewratepositive, Slewratenegative;
     real MTWOPI;
+    // Mod 3 working variables
+    real Vcs, smooth_hi, smooth_lo;
+    real Vspan, g_up, g_dn;
+    real Vclamp_hi, Vclamp_lo;
 
     analog begin
         MTWOPI = 6.28318530717958647693;
@@ -84,9 +112,9 @@ module opamp_module(inp, inn, out, vdd, vss);
         Slewratepositive = PSRT / (MTWOPI * GBP);
         Slewratenegative = NSRT / (MTWOPI * GBP);
 
-        // High-impedance path on supply pins (voltage reference only)
-        I(vdd) <+ V(vdd) * 1e-12;
-        I(vss) <+ V(vss) * 1e-12;
+        // Mod 2: quiescent supply path flows between rails, not to ground.
+        // The model no longer imposes any absolute-ground anchor on VDD or VSS.
+        I(vdd, vss) <+ V(vdd, vss) * 1e-12;
 
         // Input voltage offset
         I(inp, n7) <+ V(inp, n7);
@@ -138,39 +166,70 @@ module opamp_module(inp, inn, out, vdd, vss);
         I(n5) <+ V(n5) / RP2;
         I(n5) <+ ddt(CP2 * V(n5));
 
-        // Current limiter stage
-        if (V(n2, out) >= ILMAX)
-        begin
-            I(n4) <+ -V(n5);
-            I(n4) <+ CSCALE * V(n5) * (V(n2, out) - ILMAX);
-            I(n4) <+ V(n4);
-        end
-        else if (V(n2, out) <= -ILMAX)
-        begin
-            I(n4) <+ -V(n5);
-            I(n4) <+ -CSCALE * V(n5) * (V(n2, out) + ILMAX);
-            I(n4) <+ V(n4);
-        end
-        else
-        begin
-            I(n4) <+ -V(n5);
-            I(n4) <+ V(n4);
-        end
+        // Mod 3a: smooth current limiter.
+        // Replaces the original if/else block with continuous smooth_max
+        // approximations: smooth_max(0, x) = (x + sqrt(x^2 + eps)) / 2.
+        //
+        // smooth_hi activates when the output sources more than ILMAX (Vcs > +ILMAX).
+        // smooth_lo activates when the output sinks more than ILMAX (Vcs < -ILMAX).
+        // Together they reproduce the original fold-back behaviour continuously,
+        // which also improves Newton-Raphson convergence in DC analyses.
+        //
+        // Mathematical equivalence to the original piecewise block:
+        //   Vcs > +ILMAX: added term = CSCALE*V(n5)*(Vcs-ILMAX)          [same]
+        //   Vcs < -ILMAX: added term = CSCALE*V(n5)*(-Vcs-ILMAX)         [same]
+        //   |Vcs| <= ILMAX: smooth_hi = smooth_lo = 0, no added term      [same]
+        Vcs = V(n2, out);
+        smooth_hi = 0.5 * ((Vcs - ILMAX) + sqrt((Vcs - ILMAX) * (Vcs - ILMAX) + 1e-12));
+        smooth_lo = 0.5 * ((-Vcs - ILMAX) + sqrt((-Vcs - ILMAX) * (-Vcs - ILMAX) + 1e-12));
 
-        // Output resistance: (RO-1) ohm + 1 ohm current sense = RO total
-        I(n4, n2) <+ V(n4, n2) / (RO - 1);
-        I(n2, out) <+ V(n2, out);
+        I(n4) <+ -V(n5);
+        I(n4) <+ CSCALE * V(n5) * (smooth_hi + smooth_lo);
+        I(n4) <+ V(n4);
 
-        // Voltage limiter stage: clamp output to supply rails
-        if (V(out) > V(vdd))
-        begin
-            I(out) <+ -10.0 * V(vdd);
-            I(out) <+ 10.0 * V(out);
-        end
-        else if (V(out) < V(vss))
-        begin
-            I(out) <+ -10.0 * V(vss);
-            I(out) <+ 10.0 * V(out);
-        end
+        // Mod 3b: supply-referenced output stage.
+        // Replaces the original absolute-ground resistive chain:
+        //     n4 --(RO-1 ohm)--> n2 --(1 ohm)--> out
+        // with a pair of voltage-controlled conductances from VDD and VSS.
+        //
+        // The Thevenin equivalent at the output is unchanged:
+        //     V_th = V(n4),  R_th = RO
+        // Proof: I_out = g_up*(VDD-V_out) - g_dn*(V_out-VSS)
+        //             = [V(n4)*(VDD-VSS)] / [(RO-1)*Vspan]  -  V_out/(RO-1)
+        //             = (V(n4) - V_out) / RO    (after adding the 1-ohm sense)
+        //
+        // Crucially, the drive current now flows through VDD and VSS rather than
+        // through absolute simulator ground, so the supply rail potentials respond
+        // correctly when they are floating and the output is held by feedback.
+        //
+        // Vspan floor: smooth_max(0, Vspan) prevents division by zero if VDD~=VSS.
+        // Conductance floors: smooth_max(0, g) prevents negative conductance when
+        //   V(n4) is driven outside [VSS, VDD] by the current-limiting fold-back.
+        Vspan = V(vdd) - V(vss);
+        Vspan = 0.5 * (Vspan + sqrt(Vspan * Vspan + 1e-6));
+
+        g_up = (V(n4) - V(vss)) / ((RO - 1) * Vspan);
+        g_dn = (V(vdd) - V(n4)) / ((RO - 1) * Vspan);
+        g_up = 0.5 * (g_up + sqrt(g_up * g_up + 1e-12));
+        g_dn = 0.5 * (g_dn + sqrt(g_dn * g_dn + 1e-12));
+
+        I(vdd, n2) <+ g_up * V(vdd, n2);   // pull-up:   VDD --> n2
+        I(n2, vss) <+ g_dn * V(n2, vss);   // pull-down: n2  --> VSS
+        I(n2, out) <+ V(n2, out);           // 1-ohm current sense
+
+        // Mod 3c: smooth voltage clamp to supply rails.
+        // Replaces the original if/else clamp.  Uses smooth_max(0, x) so the
+        // 10-siemens clamping conductance activates gradually rather than
+        // switching abruptly, restoring Newton-Raphson convergence in DC sweeps.
+        // Current flows through the supply pins (I(out,vdd) and I(vss,out))
+        // rather than through absolute ground.
+        Vclamp_hi = 0.5 * (V(out, vdd) + sqrt(V(out, vdd) * V(out, vdd) + 1e-6));
+        Vclamp_lo = 0.5 * (V(vss, out) + sqrt(V(vss, out) * V(vss, out) + 1e-6));
+        I(out, vdd) <+ 10.0 * Vclamp_hi;   // pulls out down when V(out) > V(vdd)
+        I(vss, out) <+ 10.0 * Vclamp_lo;   // pulls out up  when V(out) < V(vss)
+
+        // Mod 1: output pull resistors to both supply rails.
+        I(out, vdd) <+ V(out, vdd) / RPULL;
+        I(out, vss) <+ V(out, vss) / RPULL;
     end
 endmodule
